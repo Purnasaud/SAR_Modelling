@@ -1,0 +1,515 @@
+---
+title: "Integrating Simultaneous Autoregressive Modeling to Estimate Median Home Value: 
+                                  A Case Study of Wyoming"
+author: "Purna Saud"
+format: 
+  html:
+    self-contained: true
+    embed-resources: true
+    toc: true
+    toc-title: "Contents"
+    toc-depth: 3
+    toc-location: left
+    toc-smooth-scroll: true
+    toc-sticky: true
+    css: "new_styled.css"
+editor: visual
+execute:
+  warning: false
+  message: false
+---
+## Background
+
+This research examines the spatial autocorrelation of Wyoming's median home values and assesses the spatial dependence of predictor variables to effectively model these values. Using simultaneous autoregressive (SAR) modeling, the study analyzes data from the 2022 American Community Survey (ACS) across Wyoming's census tracts.The methodology combines geospatial and statistical tools, starting with data preprocessing that involves Min-Max normalization and spatial imputation for handling missing values. Spatial relationships are established through a Queen’s contiguity spatial weights matrix, providing a robust foundation for assessing spatial dependencies. Moran’s I analyses validate significant global and local spatial autocorrelation, while the Boruta feature selection algorithm highlights critical predictors, minimizing multicollinearity and enhancing model reliability. Spatial Autoregressive (SAR) modeling is utilized to assess the impact of economic, demographic, and housing factors on normalized median home values (mhvMm), capturing spatial interactions. Advanced visualization methods, such as Moran’s scatter plots and interactive thematic maps, improve the clarity and accessibility of spatial patterns.
+
+## I. Load Required Libraries
+
+The **Load Required Libraries** section introduces essential R packages for my geospatial and statistical analysis workflow. Packages like `tidycensus` handle Census data, `sf` and `tigris` manage spatial data, and `tmap` supports mapping. Spatial modeling is performed using `spdep` and `spatialreg`, while `Boruta` aids feature selection. Visualization is enhanced with `ggplot2`, `plotly`, and `RColorBrewer`, and data wrangling is streamlined using `tidyverse`, ensuring an integrated and efficient analysis process.
+
+```{r}
+# Load Required Libraries
+library(tidycensus)
+library(sf)
+library(tigris)
+library(tmap)
+library(spdep)
+library(spatialreg)
+library(Boruta)
+library(ggplot2)
+library(RColorBrewer)
+library(plotly)
+library(tidyverse)
+library(DT)
+require(knitr)
+```
+
+## II. Set Up Census API Key
+
+This code sets the **US Census API Key** for accessing Census data. The key is saved with `install = TRUE` and can be overwritten. Get your API key at the [US Census Bureau API page](https://api.census.gov/data/key_signup.html).
+
+```{r}
+# US Census API Key
+census_api_key('312248c846fdb30816100611e375688ee60be39f', install = TRUE, overwrite = TRUE)
+```
+
+## III. Define Census Variables
+
+This code defines a set of key demographic, housing, and economic variables from the US Census Bureau, selected to develop a Simultaneous Autoregressice Model for estimating median home value at the census tract level in Wyoming.
+
+```{r}
+variables <- c(
+  # Population & Demographics
+  t_pop = "B01003_001",
+  m_age = "B01002_001",
+  p_coll_de = "B15003_022",  # College degree (25+)
+  p_white = "B03002_003",
+  
+  # Housing Characteristics
+  mhv = "B25077_001",
+  m_rent = "B25064_001",
+  p_owner = "B25008_003",
+  h_age = "B25035_001",
+  m_y_built = "B25037_001",
+  m_rooms = "B25018_001",
+  
+  # Income & Employment
+  m_h_income = "B19013_001",
+  m_income = "DP03_0062",  # Added variable
+  uemp_rate = "B23025_005",
+  po_rate = "B17001_002",
+  
+  # Additional Variables
+  m_h_year = "B25034_001",
+  p_t_rate = "B25091_001",
+  a_h_size = "B25010_001"
+)
+options(tigris_use_cache = TRUE)
+```
+
+## IV. Retrieve ACS Data and Preprocess
+
+This process retrieves the 2022 ACS data for Wyoming at the census tract level using the `get_acs` function, selecting a predefined set of variables. It removes margin of error columns, renames variables for clarity, and transforms the data to CRS 3738. A loop replaces missing values (N/A) with the mean of valid neighboring values from 5 rows before and after. Additionally, a log-transformed version of the median home value (**l_mhv**) is created. The final dataset is displayed interactively using the `datatable` function for easy exploration and analysis.
+
+```{r}
+wyoming_data <- get_acs(
+  geography = "tract",
+  variables = variables,
+  state = "WY",
+  year = 2022,
+  survey = "acs5",
+  output = 'wide',
+  geometry = TRUE
+) %>%
+  select(!ends_with("M")) %>%
+  rename_with(.fn = ~str_remove(.x, "E$")) %>%
+  st_transform(wyoming_data, crs = 3738)
+
+# Replace N/A values with neighbors' mean (5 neighbors before & after)
+for (col in 2:(ncol(wyoming_data)-1)) {  # Skip first and last columns
+  for (i in 1:nrow(wyoming_data)) {
+    
+    # Check if the value at row i, column col is NA
+    if (is.na(wyoming_data[i, col][[1]])) {  
+      
+      # Define the range for neighbors (before and after the current row)
+      start_index <- max(1, i - 5)  
+      end_index <- min(nrow(wyoming_data), i + 5)  
+      
+      # Extract neighbor values, including valid non-NA values
+      neighbor_values <- wyoming_data[start_index:end_index, col][[1]]
+      
+      # Filter out NA values
+      valid_neighbors <- neighbor_values[!is.na(neighbor_values)]
+      
+      # Replace NA with the mean of valid neighbors if available
+      if (length(valid_neighbors) > 0) {
+        wyoming_data[i, col] <- mean(valid_neighbors)
+      }
+    }
+  }
+}
+
+# Create log-transformed variable for median home value
+l_wyoming_mhv <- wyoming_data %>% 
+  mutate(l_mhv = log10(mhv))
+
+# Render the interactive table
+datatable(
+  l_wyoming_mhv,
+  options = list(
+    pageLength = 5,        # Number of rows per page
+    autoWidth = TRUE,       # Automatically adjust column width
+    scrollX = TRUE,         # Enable horizontal scrolling
+    dom = 'Bfrtip',         # Include search box, pagination, and more
+    buttons = c('csv', 'excel', 'pdf', 'print'), # Export options
+    responsive = TRUE       # Make the table responsive
+  ),
+  extensions = c('Buttons'), # Add buttons for exporting
+  rownames = FALSE           # Hide row names
+)
+```
+
+## V. Visualization: Median Home Value Distribution
+
+This analysis constructs a histogram to examine the distribution of median home values (**mhv**) in Wyoming using `ggplot2`. The data is divided into 100 bins with a navy color scheme, and the plot features a minimalistic theme and clear axis labels. To enable interactive exploration, the plot is enhanced with `ggplotly`.
+
+```{r}
+# Plotting
+plot = ggplot(wyoming_data, aes(x = mhv))+
+  geom_histogram(alpha = 0.5, fill = "navy", color = "navy",
+                 bins = 100) +
+  theme_minimal() +
+  scale_x_continuous() +
+  labs(x = "Median home value") 
+# Interactive Plot
+ggplotly(plot)
+```
+
+## Visualization with Log Median Home Value
+
+The analysis begins by visualizing the distribution of log-transformed median home values (**l_mhv**) in Wyoming. Using `ggplot2`, a histogram with 100 bins is created, employing a navy color scheme for visual clarity. The plot is presented with a minimalistic theme, and labeled for better understanding. To enhance interactivity, `ggplotly` is used for dynamic exploration of the data.
+
+```{r}
+# Original Visualization: Without Normalization
+plot <- ggplot(l_wyoming_mhv, aes(x = l_mhv) ) +
+  geom_histogram(alpha = 0.5, fill = "navy", color = "navy", bins = 100) +
+  theme_minimal() +
+  scale_x_continuous() +
+  labs(x = "Median Home Value (log10)")
+ggplotly(plot)
+
+```
+
+## VI. Data Normalization: Min-Max
+
+To standardize the dataset, Min-Max normalization is applied to the numeric columns of the Wyoming data. Using mutate, values are rescaled to a range between 0 and 1, excluding the last column. The transformed variables are renamed with a "Mm" suffix for clarity. The geometry is then re-attached, and the result is converted back into an sf object. The final dataset is displayed interactively with datatable for easy exploration.
+
+```{r}
+# Min-Max Normalization
+normalized_minmax <- wyoming_data %>%
+  st_drop_geometry() %>%
+  mutate(across(where(is.numeric) & !last_col(), ~ (.-min(.))/(max(.)-min(.)))) %>%
+  rename_with(~ paste0(., "Mm"), where(is.numeric)) %>%
+  bind_cols(st_geometry(wyoming_data)) %>%
+  st_as_sf()
+# Render the interactive table
+datatable(
+  normalized_minmax,
+  options = list(
+    pageLength = 5,        # Number of rows per page
+    autoWidth = TRUE,       # Automatically adjust column width
+    scrollX = TRUE,         # Enable horizontal scrolling
+    dom = 'Bfrtip',         # Include search box, pagination, and more
+    buttons = c('csv', 'excel', 'pdf', 'print'), # Export options
+    responsive = TRUE       # Make the table responsive
+  ),
+  extensions = c('Buttons'), # Add buttons for exporting
+  rownames = FALSE           # Hide row names
+) # Add scrollable box for large tables
+
+```
+
+## VII. Make a Choropleth Map for the Median Home Value Distribution
+
+This code visualizes the normalized median home values (`mhvMm`) across Wyoming's census tracts using the `tmap` package in interactive view mode. The map applies a `YlGnBu` color palette, representing the data with semi-transparent polygons.This approach offers an informative and visually appealing spatial representation of median home values.
+
+```{r}
+# first let's change the visualization mode as view 
+tmap_mode('view')
+tm_shape(normalized_minmax) +
+  tm_polygons(
+    col = "mhvMm",               # Column for Median Home Value
+    palette = "YlGnBu",         # Sequential color palette
+    title = "Median Home Value",
+    alpha = 0.6  # Transparency
+  ) +
+  tm_layout(
+    main.title = "Median Home Value in Wyoming by Census Tract",
+    main.title.size = 1.3,
+    main.title.fontface = "bold",
+    main.title.position = c(0.1, 0.2), # Adjust title position
+    panel.label.size = 0.8,             # Panel label text size
+    inner.margins = c(0.05, 0.02, 0.08, 0.02),
+    outer.margins = c(0.05, 0.05, 0.1, 0.1)
+  ) +
+  tm_borders(
+    col = "gray",
+    lwd = 0.08                # Border thickness
+  ) +
+  tm_scale_bar(
+    position = c(0.55, 0.01), # Centered at bottom of map
+    text.size = 0.5,          # Scale bar text size
+    lwd = 0.5                 # Scale bar line thickness
+  ) 
+```
+
+## VIII. Construct Spatial Weight Matrix
+
+This code constructs a Queen's contiguity neighborhood structure using `poly2nb`, identifying neighbors based on shared edges or vertices. The `nb2listw` function then creates a row-standardized spatial weights matrix, ensuring each tract's weights sum to 1, enabling spatial dependence analysis while handling tracts with no neighbors (`zero.policy = TRUE`).
+```{r}
+# Create Queen's neighborhood structure and row-standardized weights
+nqueen <- poly2nb(normalized_minmax, queen = TRUE)
+nqueenw <- nb2listw(nqueen, style = 'W', zero.policy = TRUE)
+```
+
+## IX. Visualizing the Neighboring Structure at Census Tract Level
+
+This code visualizes the spatial relationships between Wyoming census tracts using a Queen's contiguity neighboring structure. Geometric centroids are calculated for each tract, and red lines connect neighboring centroids to represent adjacency. Polygons are styled with light gray fills and borders, and centroids are marked as blue dots. An interactive map is created using the `tmap` package in "view" mode, incorporating a Leaflet basemap for dynamic exploration. The map includes popups displaying tract information, a clean layout with enhanced legends, and an intuitive design to analyze spatial connections and neighborhood structures effectively.
+
+```{r}
+
+# Extract coordinates for the polygons
+coords <- st_coordinates(st_geometry(normalized_minmax))
+
+# Create empty list to store the neighbor lines
+neighbor_lines <- list()
+
+# Loop through the neighbors and create lines between centroids
+for (i in seq_along(nqueen)) {
+  for (neighbor_id in nqueen[[i]]) {
+    # Ensure there are no duplicate neighbor pairs
+    if (i < neighbor_id) {
+      # Get the coordinates for the centroids of the current and neighboring polygons
+      centroid_i <- st_coordinates(st_centroid(normalized_minmax[i, ]))
+      centroid_neighbor <- st_coordinates(st_centroid(normalized_minmax[neighbor_id, ]))
+      
+      # Create a linestring geometry from the two centroids
+      line <- st_sfc(st_linestring(rbind(centroid_i, centroid_neighbor)), crs = st_crs(wyoming_data))
+      
+      # Append the linestring to the list of neighbor lines
+      neighbor_lines <- append(neighbor_lines, list(line))
+    }
+  }
+}
+
+# Combine all the lines into a single 'sf' object
+neighbor_lines_sf <- do.call(c, neighbor_lines)
+
+# Calculate centroids for visualization
+centroids <- st_centroid(normalized_minmax)
+
+# Convert centroids to sf (if not already in the correct format)
+centroids_sf <- st_as_sf(centroids)
+
+# Create the map using tmap
+tmap_mode("view")  # Set to interactive mode
+
+# Plot the map with Leaflet basemap and advanced styling
+tm_shape(normalized_minmax) + 
+  tm_borders(col = "grey", lwd = 2) +  # Polygon borders with slight width
+  tm_fill(col = "lightgray", 
+          alpha = 0.5,
+          popup.vars = "NAM") +
+  tm_dots(col = "blue", size = 0.07, legend.show = TRUE, title = "Centroids") +  # Centroids in magenta
+  tm_shape(neighbor_lines_sf) + 
+  tm_lines(col = "red", lwd = 1) +  # Neighbor lines in green
+  tm_layout(
+    main.title = "Neighboring Structure at Census Tract Level: Wyoming (Queen's)",
+    main.title.size = 1.5,  # Increase title size
+    main.title.position = c("center", "top"),
+    legend.title.size = 1.1,  # Legend title size
+    legend.text.size = 0.8,   # Legend text size
+    frame = FALSE,  # No frame around the map
+    fontfamily = "Arial"
+  ) + 
+  tm_basemap("OpenStreetMap")  # Adding OpenStreetMap as the Leaflet basemap
+
+```
+
+## X. Spatial Autocorrelation Analysis (Moran's I)
+
+Global Moran's I is calculated to assess the overall spatial autocorrelation of normalized median home values (`mhvMm`). Using the `moran.test` function, the test evaluates whether similar home values are clustered or dispersed across Wyoming census tracts. The Queen's contiguity spatial weights matrix (`nqueenw`) is employed to define spatial relationships, with `zero.policy = TRUE` handling regions without neighbors and `na.action = na.exclude` addressing missing values. The result quantifies the degree and significance of spatial autocorrelation, providing insights into the spatial structure of home values.
+```{r}
+# Global Moran's I Spatial Autocorrelation
+gmoran_result <- moran.test(normalized_minmax$ mhvMm, nqueenw, zero.policy = TRUE, na.action = na.exclude)
+gmoran_result
+```
+
+## XI. Moran's Scatter Plot
+
+This code constructs an **interactive Moran's I scatterplot** to analyze spatial autocorrelation in log-transformed median home values (`mhvMm`) across Wyoming census tracts. Using the row-standardized spatial weights matrix (`nqueenw`), spatial lags (`lagged_mhv`) are calculated via `lag.listw`. A linear regression model captures the relationship between `log_mhv` and `lagged_mhv`, with predictions used to plot a trend line. The scatterplot, created with `plotly`, features interactive points and a regression line, offering a dynamic visualization of spatial dependence and its directional trend.
+
+```{r}
+# Prepare data for Moran's plot
+lagged_var <- lag.listw(nqueenw, normalized_minmax$ mhvMm, zero.policy = TRUE)
+moran_data <- data.frame(
+  log_mhv = normalized_minmax$ mhvMm,
+  lagged_mhv = lagged_var
+)
+
+# Linear regression for the scatterplot line
+# Prepare data for Moran's plot
+lagged_var <- lag.listw(nqueenw, normalized_minmax $ mhvMm, zero.policy = TRUE)
+moran_data <- data.frame(
+  log_mhv = normalized_minmax$ mhvMm,
+  lagged_mhv = lagged_var
+)
+
+# Linear regression for the scatterplot line
+fit <- lm(lagged_mhv ~ log_mhv, data = moran_data)
+line_data <- data.frame(
+  log_mhv = seq(min(moran_data$log_mhv), max(moran_data$log_mhv), length.out = 150),
+  lagged_mhv = predict(fit, newdata = data.frame(log_mhv = seq(min(moran_data$log_mhv), max(moran_data$log_mhv), length.out = 150)))
+)
+
+# Create interactive scatterplot with regression line
+plot_ly() %>%
+  add_trace(
+    data = moran_data,
+    x = ~log_mhv,
+    y = ~lagged_mhv,
+    type = 'scatter',
+    mode = 'markers',
+    marker = list(size = 7, color = 'blue'),
+    hoverinfo = 'text',
+    text = ~paste("log_mhv: ", round(log_mhv, 2), "<br>Lagged: ", round(lagged_mhv, 2))
+  ) %>%
+  add_lines(
+    data = line_data,
+    x = ~log_mhv,
+    y = ~lagged_mhv,
+    line = list(color = 'red', dash = 'solid'),
+    name = "Trend Line"
+  ) %>%
+  layout(
+    title = "Interactive Moran's I Scatterplot",
+    xaxis = list(title = "Median Home Value (log10)"),
+    yaxis = list(title = "Spatial Lag of Median Home Value")
+  )
+
+```
+
+## XII. Local Moran's I (LISA) Analysis and Cluster Mapping
+
+Using Local Moran's I, this code identifies and visualizes spatial clusters of normalized median home values (`mhvMm`) across Wyoming census tracts. The `localmoran` function computes local Moran’s I statistics, which are appended to the dataset for classification. Cluster types—High-High, Low-Low, High-Low, and Low-High—are determined based on quadrant analysis of deviations from the mean, with insignificance identified using a 10% significance threshold.
+An interactive cluster map is created using `tmap` in view mode. Polygons are colored to represent cluster types, with a custom palette distinguishing significant spatial patterns. Popups display tract information and cluster classification, while the map features a well-designed layout, including adjusted margins, title placement, and a dynamic Leaflet basemap. This visualization highlights localized spatial autocorrelation, aiding in spatial pattern analysis.
+```{r}
+lmoran <- localmoran(normalized_minmax$ mhvMm, nqueenw)
+# Bind Local Moran's I result to data and classify clusters
+normalized_minmax <- cbind(normalized_minmax, lmoran)
+
+# Quadrant Classification
+m_mhv <- normalized_minmax$ mhvMm - mean(normalized_minmax$ mhvMm)
+m_lmoran <- lmoran[, 1] - mean(lmoran[, 1])
+signif <- 0.1  # Significance threshold
+
+quadrant <- vector(mode = "numeric", length = nrow(lmoran))
+quadrant[m_mhv > 0 & m_lmoran > 0] <- 4
+quadrant[m_mhv < 0 & m_lmoran < 0] <- 1
+quadrant[m_mhv < 0 & m_lmoran > 0] <- 2
+quadrant[m_mhv > 0 & m_lmoran < 0] <- 3
+quadrant[lmoran[, 5] > signif] <- 0
+
+normalized_minmax$quadrant <- factor(quadrant, levels = c(0, 1, 2, 3, 4),
+                                labels = c("Insignificant", "Low-Low", "Low-High", "High-Low", "High-High"))
+
+# Cluster Map Visualization
+colors <- c("white", "blue", rgb(0, 1, 0, alpha = 0.6), rgb(1, 1, 0, alpha = 0.6), "red")
+
+# moran_clusters <- 
+tmap_mode('view')
+tm_shape(normalized_minmax) +
+  tm_polygons(
+    col = "quadrant",
+    palette = colors,  # Color palette for clusters
+    title = "Clusters", 
+    alpha = 0.6,
+    popup.vars = c("NAM", "quadrant")
+  ) +
+  tm_layout(
+    main.title = "Local Moran's I Clusters",
+    main.title.size = 1.5,
+    main.title.fontface = "bold",
+    main.title.position = c(0.25, 0.2),                         
+    bg.color = "grey", 
+    panel.label.bg.color = "grey",           # Panel label background
+    panel.label.size = 0.8,                       # Smaller panel label size
+    inner.margins = c(0.05, 0.02, 0.08, 0.02),      # Adjust margins
+    outer.margins = c(0.05, 0.05, 0.1, 0.1)     # Space for outside elements
+  ) +
+  tm_borders(
+    col = "gray",
+    lwd = 0.08
+  ) +
+  tm_basemap("OpenStreetMap")
+
+```
+
+## XIII Test for Residual Social Outcome Dependence or Autocorrelation
+
+This code performs a diagnostic test for spatial autocorrelation in the residuals of an Ordinary Least Squares (OLS) regression model. An empty OLS model (`mhvMm ~ 1`) is defined, assuming no predictors, using the `lm` function. The **Moran's I test** for residuals is then conducted with `lm.morantest`, utilizing the row-standardized Queen's contiguity spatial weights (`nqueenw`). The test assesses whether spatial patterns exist in the residuals, indicating potential misspecification of the model or the presence of unaccounted spatial dependence. The `zero.policy = TRUE` parameter handles cases with polygons having no neighbors.
+```{r}
+# Empty Ordinary Least Square Regression Model
+model1 <- lm(formula = mhvMm ~ 1, data = normalized_minmax)
+
+#VI. Residual Autocorrelation
+lm.morantest(model1, nqueenw, zero.policy=TRUE)
+
+```
+
+## XIV Lagrange Multiplier Tests
+This code conducts **Lagrange Multiplier (LM) tests** to diagnose spatial dependence in a linear regression model (`model1`). The `lm.LMtests` function evaluates both **spatial lag dependence** and **spatial error dependence** using the Queen's contiguity spatial weights matrix (`nqueenw`). These tests help determine whether spatial processes significantly affect the dependent variable (`mhvMm`) or the error terms, providing guidance on whether a spatial lag or spatial error model should be considered for improved model specification. The `zero.policy = TRUE` parameter ensures compatibility with tracts that have no neighbors.
+
+```{r}
+# Lagrange Multiplier (LM) tests to diagnose spatial dependence in a linear regression model
+lm.LMtests(model1, nqueenw, zero.policy = TRUE)
+```
+
+## XV. Simultaneous Autoregressive (SAR) Modelling
+
+This section applies a **Spatial Autoregressive (SAR) model** using `spautolm` to evaluate the influence of demographic, economic, and housing variables on normalized median home values (`mhvMm`) while accounting for spatial dependence. The model incorporates a Queen's contiguity spatial weights matrix (`nqueenw`) to capture spatial interactions. Key predictors include population size, income, housing age, and unemployment rates. The results are summarized with `summary()` and presented using `kable`, offering a detailed yet concise overview of variable effects and spatial dependencies in the data.
+```{r}
+# SAR Modelling
+norm_SAR <- spatialreg::spautolm(
+  formula = mhvMm ~ t_popMm + m_ageMm + p_coll_deMm + p_whiteMm +
+   m_rentMm + p_ownerMm + h_ageMm + m_y_builtMm + m_roomsMm + 
+    m_h_incomeMm + uemp_rateMm + po_rateMm + m_h_yearMm + p_t_rateMm + 
+    a_h_sizeMm,
+  data = normalized_minmax, listw = nqueenw, zero.policy = TRUE
+)
+
+sarOut <- summary(norm_SAR)
+kable(sarOut$Coef)
+
+```
+
+## XVI. Boruta Feature Selection and SAR Modelling
+
+This section addresses **place-based multicollinearity** by implementing the Boruta feature selection algorithm to identify the most important predictors for modeling normalized median home values (`mhvMm`). The Boruta algorithm evaluates the relevance of demographic, economic, and housing variables, eliminating unimportant predictors while retaining significant ones. 
+Using the selected features, a **Spatial Autoregressive (SAR) model** is constructed with `spautolm`, incorporating the Queen’s contiguity spatial weights matrix (`nqueenw`) to account for spatial dependence. Key predictors include population size, education levels, rental rates, and housing characteristics. The refined model reduces multicollinearity, improving the robustness of spatial analysis. Results, including coefficients and spatial effects, are summarized with `summary()` and presented using `kable` for clear interpretation. This approach ensures a precise and efficient modeling process.
+
+```{r}
+# Prepare data for Boruta
+selected_columns <- c( "p_ownerMm", "uemp_rateMm", "a_h_sizeMm", "m_ageMm",
+                       "t_popMm", "p_coll_deMm", "p_whiteMm", "m_rentMm", 
+                       "h_ageMm", "m_y_builtMm", "m_roomsMm", "m_h_incomeMm", 
+                       "po_rateMm", "m_h_yearMm", "p_t_rateMm")
+
+boruta_data <- normalized_minmax[, selected_columns] %>%
+  st_drop_geometry()  # Drop geometry for Boruta
+boruta_data <- as.data.frame(boruta_data)  # Ensure it's a data frame
+
+# Run Boruta
+set.seed(123)
+boruta_result <- Boruta(boruta_data, normalized_minmax$mhvMm, doTrace = 2)
+
+# Display results and retrieve important features
+print(boruta_result)
+
+plot(boruta_result, main = "Boruta Feature Importance", las = 2)
+final_features <- getSelectedAttributes(boruta_result, withTentative = TRUE)
+
+SAR_boruta <- spatialreg::spautolm(
+  formula = mhvMm ~ t_popMm + m_ageMm + p_coll_deMm + p_whiteMm +
+   m_rentMm + p_ownerMm + h_ageMm + m_y_builtMm + m_roomsMm + 
+    m_h_incomeMm + po_rateMm + m_h_yearMm + p_t_rateMm + 
+    a_h_sizeMm,
+  data = normalized_minmax, listw = nqueenw, zero.policy = TRUE
+)
+modOut<- summary(SAR_boruta)
+kable(modOut$Coef)
+```
+
+## XVII. Conclusion
+
+This study highlights the importance of spatial socio-econometric modeling in understanding the spatial distribution of median home values in Wyoming.The Spatial Autoregressive (SAR) model, supported by tests like Moran’s I and Lagrange Multiplier, identifies key factors such as household income, housing size, and property tax rates while showing the need to account for spatial connections. The Boruta-refined SAR model creates a strong framework by focusing on important factors and reducing overlap between variables. The results offer useful insights for policymakers and urban planners, helping them make informed decisions to promote fair and balanced regional growth. The use of advanced spatial analysis and interactive visuals makes this approach easy to replicate and valuable for future studies in geospatial research.
